@@ -1,0 +1,86 @@
+#include "../../imports/stdlib.fc";
+
+const int op::liquidation = 2;
+
+;; 사용자의 담보 자산 가치를 계산하는 함수
+(int) get_collateral_value(slice user, slice collateralAsset) impure {
+    return 100;
+}
+
+;; 사용자의 부채 가치를 계산하는 함수
+(int) get_debt_value(slice user, slice debtAsset) impure {
+    return 100;
+}
+
+;; 사용자의 Health Factor를 계산하는 함수
+(int) check_health_factor(slice user, slice collateralAsset, slice debtAsset) impure {
+    int collateralValue = get_collateral_value(user, collateralAsset);
+    int debtValue = get_debt_value(user, debtAsset);
+
+    int healthFactor = debtValue / collateralValue;
+    return healthFactor;
+}
+
+;; 청산을 수행하는 함수
+() liquidationCall(
+    slice collateralAsset,
+    slice debtAsset,
+    slice user,
+    int debtToCover,
+    int receiveAToken
+) impure {
+    ;; 실제 청산 로직 구현부
+    ;; 청산 후 사용자의 부채 상환, 담보 회수
+    return ();
+}
+
+;; 청산 트랜잭션을 처리하는 함수
+() execute_liquidation_call(
+    slice collateralAsset,
+    slice debtAsset,
+    slice user,
+    int debtToCover,
+    int receiveAToken
+) impure {
+    ;; 청산 가능 여부를 확인 (추후에 validation 로직 추가)
+    int healthFactor = check_health_factor(user, collateralAsset, debtAsset);
+    
+    ;; 임계값 설정 (70%)
+    int threshold = 70;
+
+    ;; 임계값보다 높을 경우 청산 진행
+    if (healthFactor * 100 > threshold) {
+        liquidationCall(collateralAsset, debtAsset, user, debtToCover, receiveAToken);
+    } else {
+        throw(100);  ;; 청산 불가
+    }
+}
+
+;; recv_internal is the main function of the contract and is called when it receives a message from other contracts
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { ;; ignore all empty messages
+        return ();
+    }
+
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) { ;; ignore all bounced messages
+        return ();
+    }
+
+    int op = in_msg_body~load_uint(32); ;; by convention, the first 32 bits of incoming message is the op
+    int query_id = in_msg_body~load_uint(64); ;; also by convention, the next 64 bits contain the "query id", although this is not always the case
+
+    if (op == op::liquidation) {
+        slice collateralAsset = in_msg_body~load_msg_addr();
+        slice debtAsset = in_msg_body~load_msg_addr();
+        slice user = in_msg_body~load_msg_addr();
+        int debtToCover = in_msg_body~load_uint(256);
+        int receiveAToken = in_msg_body~load_bool();
+
+        execute_liquidation_call(collateralAsset, debtAsset, user, debtToCover, receiveAToken);
+        return ();
+    }
+
+    throw(0xffff); ;; if the message contains an op that is not known to this contract, we throw
+}
