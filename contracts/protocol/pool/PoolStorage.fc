@@ -1,75 +1,105 @@
+;; PoolStorage.fc
 #include "../../imports/stdlib.fc";
-#include "../logic/calculate_supply.fc";
+#include "../../imports/constants.fc";       ;; op::deposit(), etc.
+#include "../opcodes/op-codes.fc";       ;; op::mint() = 21
+#include "../../imports/params.fc";         ;; workchain(), etc.
+#include "../../imports/Utils.fc";           ;; send_raw_message or send_grams if needed
 
-;; Load the storage
-(cell) load_storage() inline {
+;; /*
+;;   PoolStorage: 
+;;   - 전역 변수에 (user→예치TON) 딕셔너리
+;;   - jettonMinterAddress: TEP-74 Jetton Minter 주소 (admin = Pool)
+;; */
+
+global cell pool_dict;          ;; (userHash -> deposit)
+global slice jettonMinterAddress;  ;; Minter 컨트랙트 주소 (LP 토큰)
+
+;; load/save pool dict
+(cell) load_pool_dict() inline {
     slice ds = get_data().begin_parse();
-
     if (ds.slice_empty?()) {
-        ;; If storage is empty, return new empty dictionary
         return new_dict();
     }
     return ds~load_dict();
 }
 
-() save_storage(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) {
-    ;; Parse sender address from message
-    slice cs = in_msg_full.begin_parse();
-    cs~skip_bits(4); ;; skip flags
-    slice sender_address = cs~load_msg_addr();
-    
-    ;; Load existing dictionary
-    cell dict = load_storage();
-    
-    ;; Get existing supply for this address if any
-    (slice value, int success) = dict.udict_get?(256, sender_address.preload_uint(256));
-    int current_supply = 0;
-    if (success) {
-        current_supply = value~load_coins();
+() save_pool_dict(cell newDict) inline {
+    set_data(begin_cell().store_dict(newDict).end_cell());
+}
+
+;; 유저 예치량 조회
+int get_user_deposit(slice user) impure {
+    cell dict = load_pool_dict();
+    var (valSlice, found) = dict.udict_get?(256, user.preload_uint(256));
+    if (found == 0) {
+        return 0;
     }
-    
-    ;; Add new supply to existing amount
-    int new_supply = current_supply + msg_value;
-    
-    ;; Store updated supply amount
+    return valSlice~load_coins();
+}
+
+;; 유저 예치량 설정
+() set_user_deposit(slice user, int newValue) impure {
+    cell dict = load_pool_dict();
     dict~udict_set(
         256,
-        sender_address.preload_uint(256),
-        begin_cell().store_coins(new_supply).end_cell().begin_parse()
+        user.preload_uint(256),
+        begin_cell().store_coins(newValue).end_cell().begin_parse()
     );
-
-    ;; Store in global variables
-    stored_user_address = sender_address.preload_uint(256);
-    stored_user_value = new_supply;
-    
-    ;; Save updated dictionary to storage
-    set_data(
-        begin_cell()
-            .store_dict(dict)
-        .end_cell()
-    );
+    save_pool_dict(dict);
 }
 
-;; Helper function to get user's supply
-(int) get_user_supply(slice user_address) inline {
-    cell dict = load_storage();
-    (slice value, int success) = dict.udict_get?(256, user_address.preload_uint(256));
-    if (success == 0) {
-        return 0;  ;; Return 0 for new addresses
+;; LP 토큰 민팅:
+;; Pool이 Minter에게 op::mint 메시지를 보냄
+() mint_lp_tokens(slice user, int mintedAmount) impure {
+    if (mintedAmount <= 0) {
+        return ();
     }
-    return value~load_coins();
+    ;; TEP-74 op::mint == 21
+    int queryId = 1;  ;; arbitrary
+    ;; /* 
+    ;;   body structure in Minter:
+    ;;   (op::mint, query_id, to_address, amount, master_msg)
+    ;;   see "Jettons discoverable smart contract" -> 
+    ;;     if (op == op::mint()) { ... }
+    ;; */
+    var msgBody = begin_cell()
+        .store_uint(op::mint(), 32)   ;; 21
+        .store_uint(queryId, 64)
+        .store_slice(user)            ;; to_address
+        .store_coins(mintedAmount)    ;; amount
+        .store_ref(null())            ;; master_msg
+        .end_cell();
+
+    ;; build internal msg:
+    var msg = begin_cell()
+      .store_uint(0x18, 6)  ;; bounce:true, ihr_disabled:true
+      .store_slice(jettonMinterAddress) 
+      .store_coins(20000000)        ;; ~0.02 TON for fees (example)
+      .store_uint(1, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+      .store_ref(msgBody)
+    .end_cell();
+
+    send_raw_message(msg, 64);
 }
 
-(cell, int, int) get_store() method_id {
-    load_data(); ;; Load the stored data into memory
-    return (begin_cell()
-                .store_ref(begin_cell().store_uint(stored_user_address, 256).end_cell())
-                .store_uint(stored_user_value, 64)
-            .end_cell(), 
-            stored_user_address, 
-            stored_user_value);
+;; 예치 처리 (add deposit)
+() deposit(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    ;; parse sender from the inbound message
+    slice cs = in_msg_full.begin_parse();
+    cs~skip_bits(4);
+    slice sender_addr = cs~load_msg_addr();
+
+    int oldDep = get_user_deposit(sender_addr);
+    int newDep = oldDep + msg_value;
+    set_user_deposit(sender_addr, newDep);
+
+    ;; LP 토큰 민팅
+    if (msg_value > 0) {
+        mint_lp_tokens(sender_addr, msg_value);
+    }
 }
 
-(int) get_ltv() inline {
-    return return_ltv();
+;; simple get method: user deposit
+(int) getUserDeposit(slice user) method_id {
+    return get_user_deposit(user);
 }

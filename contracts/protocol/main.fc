@@ -1,48 +1,88 @@
+;; main.fc
 
 #include "../imports/stdlib.fc";
-#include "opcodes/op-codes.fc";  
+#include "./opcodes/op-codes.fc";
+#include "../imports/JettonUtils.fc";
+#include "../imports/constants.fc";
+#include "../imports/Utils.fc";
+#include "./pool/PoolStorage.fc";
 
-#include "pool/Supply.fc"; 
+global slice jettonMinterAddress;  ;; JettonMinter 컨트랙트 주소 (admin == main 컨트랙트)
+global cell pool_dict;            ;; 만약 supply 로직에 (user → TON 예치)를 저장
 
+() handle_mint_op(int queryId, int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    ;; 예: 유저가 main에 op::mint 보냈을 때, main이 JettonMinter로 forward
+    slice to_address = in_msg_body~load_msg_addr();
+    int amount = in_msg_body~load_coins();
 
-() execute_op (int my_balance, int msg_value, cell in_msg_full, slice in_msg_body){
+    ;; master_msg(추가 payload) 파싱
+    cell master_msg = in_msg_body~load_ref();
 
+    ;; Minter로 internal message 전송: op::mint
+    ;; mint_tokens에서와 동일한 형식
+    var msgBody = begin_cell()
+        .store_uint(op::mint(), 32)
+        .store_uint(queryId, 64)
+        .store_slice(to_address)
+        .store_coins(amount)
+        .store_ref(master_msg)
+    .end_cell();
 
-    int op = in_msg_body~load_uint(32); ;; by convention, the first 32 bits of incoming message is the op
-    int query_id = in_msg_body~load_uint(64); ;; also by convention, the next 64 bits contain the "query id", although this is not always the case
+    var msg = begin_cell()
+      .store_uint(0x18, 6)
+      .store_slice(jettonMinterAddress)
+      .store_coins(20000000)  ;; for gas
+      .store_uint(1, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+      .store_ref(msgBody)
+    .end_cell();
 
-    
+    send_raw_message(msg, 64);
+}
 
-    if (op == op::supply) {
-        user_supply(my_balance,msg_value,in_msg_full,in_msg_body);
+() handle_burn_op(int queryId, int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    ;; similar approach
+    ;; user -> main -> minter or wallet
+    ;; but typically burn is called on the JettonWallet itself
+}
 
-        return(); 
+() execute_op(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) {
+    int opCode = in_msg_body~load_uint(32);
+    int queryId = in_msg_body~load_uint(64);
+
+    ;; 1) Jetton 표준 op: mint
+    if (opCode == op::mint()) {
+        handle_mint_op(queryId, my_balance, msg_value, in_msg_full, in_msg_body);
+        return ();
     }
 
-
-    if (op == op::borrow){
-        return(); 
-
+    ;; 2) Jetton 표준 op: burn
+    if (opCode == op::burn()) {
+        handle_burn_op(queryId, my_balance, msg_value, in_msg_full, in_msg_body);
+        return ();
     }
 
+    ;; 3) DeFi op: supply
+    if (opCode == op::supply) {
+        deposit(my_balance, msg_value, in_msg_full, in_msg_body);
+        return ();
+    }
+
+    ;; etc...
     throw(0xffff);
 }
 
 () recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
-    if (in_msg_body.slice_empty?()) { ;; ignore all empty messages
+    if (in_msg_body.slice_empty?()) {
         return ();
     }
-
-
-    
     slice cs = in_msg_full.begin_parse();
     int flags = cs~load_uint(4);
-    if (flags & 1) { ;; ignore all bounced messages
+    if (flags & 1) {
+        ;; bounce
         return ();
     }
 
     execute_op(my_balance, msg_value, in_msg_full, in_msg_body);
-    ;; Handle different operations
-    
-    throw(0xffff); ;; Throw error if operation not recognized
+
+    throw(0xffff);
 }
